@@ -1,14 +1,58 @@
+# -*- coding: latin-1 -*-
+#
+# Query the dictionary http://dict.leo.org/ from within Python.
+# This is based on an equivalent script for German/English by:
+#
+# Copyright (C) 2015 Ian Denhardt <ian@zenhack.net>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# ------------------------------------------------------------------------------
+# Usage:
+# ------------------------------------------------------------------------------
+# import LeoAccess as leo
+# ret = leo.search("some string")
+# ------------------------------------------------------------------------------
+# 'ret' will be {} if nothing found or any error, or contain a dictionary with a
+# variable number of 'section_names' (see below) as keys.
+# The value of each key is a list of sub-dictionaries of word pairs
+# {"sl": "source", "de": "german"}.
+# When required, the dictionary 'sn_de' can be used to translate section_names
+# into German.
+# ------------------------------------------------------------------------------
+# Dependencies:
+# requests, lxml, io
+# ------------------------------------------------------------------------------
 import requests
 from lxml import etree
 from io import StringIO
-import logging
-import time
 
-
-logging.getLogger("requests").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-
-uri = 'http://dict.leo.org/%s%s/' # LEO uri
+# ==============================================================================
+# Constants
+# ==============================================================================
+sl = 'es'                    # default source language (Spanish - Español)
+# Currently (Feb 2016), the following languages are available in LEO:
+# English (en), tested, 800 k-entries
+# French (fr), tested, 250 k-entries
+# Spanish (es), tested, 200 k-entries
+# Italian (it), tested, 180 k-entries
+# Chinese (ch), tested, 186 k-entries
+# Russian (ru), tested, 272 k-entries
+# Portuguese (pt), tested, 82 k-entries
+# Polish (pl), tested, 59 k-entries
+tl = 'de'                    # target language (German). Actually a constant:
+# LEO is a German company
+uri = 'http://dict.leo.org/%s%s/'  # LEO uri
 section_names = (
     'subst',
     'verb',
@@ -19,98 +63,82 @@ section_names = (
     'example',
 )
 
+# ==============================================================================
+# for translating setion names to target language (German) - not used here
+# ==============================================================================
+sn_de = {'subst': "Substantiv",
+         'verb': "Verb",
+         'adjadv': "Adj./Adv.",
+         'praep': "Praeposition",
+         'definition': "Definition",
+         'phrase': "Phrase",
+         'example': "Beispiel", }
+
 
 class Leo:
-   def __init__(self, source_language='en', target_language='de', section_names=section_names, wait_between_search=20.0):
-      self.sl = source_language
-      self.tl = target_language
-      self.section_names = section_names
-      self.wait_between_search = wait_between_search
-      self._first_wait = False
-      # English (en)
-      # French (fr)
-      # Spanish (es)
-      # Italian (it)
-      # Chinese (ch)
-      # Russian (ru)
-      # German (de)
-      # Portuguese (pt)
-      # Polish (pl)
+    def _get_text(self, elt):
+        buf = StringIO()
 
-   def _get_text(self, elt):
-      buf = StringIO()
+        def _helper(_elt):
+            if _elt.text is not None:
+                buf.write(_elt.text)
+            for child in _elt:
+                _helper(child)
+            if _elt.tail is not None:
+                buf.write(_elt.tail)
 
-      def _helper(_elt):
-         if _elt.text is not None:
-               buf.write(_elt.text)
-         for child in _elt:
-               _helper(child)
-         if _elt.tail is not None:
-               buf.write(_elt.tail)
+        _helper(elt)
+        return buf.getvalue()
 
-      _helper(elt)
-      return buf.getvalue()
-
-   def _format_ret(self, ret):
-      format_ret = ''
-      for x in ret:
-         # subst, verb, adjadv, definition, example, subst, phrase
-         if x not in self.section_names:
-            continue
-         x[0].upper()
-         format_ret += x + '\n'
-         for x in ret[x]:
-            sl = x[self.sl][0].upper() + x[self.sl][1:]
-            tl = x[self.tl][0].upper() + x[self.tl][1:]
-            format_ret += sl + '\t' + tl + '\n'
-         format_ret += '\n'
-      return format_ret
-
-   def _wait(self):
-      if self._first_wait:
-         time.sleep(self.wait_between_search)
-         self._first_wait = False
-      self._first_wait = True
-
-   def search(self, term, timeout = 10, max_results = 999):
-      self._wait()
-
-      url = uri % (self.sl, self.tl)
-      resp = requests.get(url, params={'search': term}, timeout=timeout)
-      ret = {}
-      if resp.status_code != requests.codes.ok:
-         return ret
-      p = etree.HTMLParser()
-      html = etree.parse(StringIO(resp.text), p)
-      for section_name in self.section_names:
-         section = html.find(".//div[@id='section-%s']" % section_name)
-         if section is None:
-            continue
-         ret[section_name] = []
-         results = section.findall(".//td[@lang='%s']" % (self.sl,)) # source language
-         for index, r_sl in enumerate(results):
-            if index >= max_results:
-               break
-            r_tl = r_sl.find("./../td[@lang='%s']" % (self.tl,)) # target language
-            ret[section_name].append({
-               self.sl: self._get_text(r_sl).strip(),
-               self.tl: self._get_text(r_tl).strip(),
-            })
-      return self._format_ret(ret)
+    def search(self, term, lang='en', timeout=None, max_results=999):
+        '''term = search term
+        lang = source language, one of en, es, it, fr, pt, ch, ru, pt, pl
+        timeout = None or max. number of seconds to wait for response'''
+        sl = lang
+        url = uri % (sl, tl)
+        resp = requests.get(url, params={'search': term}, timeout=timeout)
+        ret = {}
+        if resp.status_code != requests.codes.ok:
+            return ret
+        p = etree.HTMLParser()
+        html = etree.parse(StringIO(resp.text), p)
+        for section_name in section_names:
+            section = html.find(".//div[@id='section-%s']" % section_name)
+            if section is None:
+                continue
+            ret[section_name] = []
+            results = section.findall(
+                ".//td[@lang='%s']" % (sl,))  # source language
+            for index, r_sl in enumerate(results):
+                if index >= max_results:
+                    break
+                r_tl = r_sl.find("./../td[@lang='%s']" %
+                                 (tl,))     # target language
+                ret[section_name].append({
+                    sl: self._get_text(r_sl).strip(),
+                    tl: self._get_text(r_tl).strip(),
+                })
+        return ret
 
 
 def main():
-   sections = (
-      'subst',
-      'definition',
-      'phrase',
-      'example',
-   )   
-   leo = Leo(section_names=sections)
-   # leo = Leo()
-   result = leo.search('milk', max_results=5)
-   print(result)
+    leo = Leo()
+    result = leo.search('autor', lang='en', max_results=3)
+    print(result)
+    for x in result:
+        # subst
+        # verb
+        # adjadv
+        # definition
+        # example
+        # subst
+        # phrase
+        print(x)
+    for x in result:
+        print(x)
+        for x in result[x]:
+            print(x['de'])
 
 
 if __name__ == '__main__':
-   main()
+    main()
